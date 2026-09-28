@@ -64,6 +64,15 @@
     border-radius:20px;
     backdrop-filter:blur(3px);
     overflow-y:auto;
+    touch-action:pan-y;   /* body 가 touch-action:none 이라 설명이 판보다 길면 스크롤이 막혔다 */
+  }
+  /* 세로가 짧은 폰(로비 안에서 열면 더 짧다): 설명 화면을 촘촘하게 */
+  @media (max-height:700px) {
+    #overlay { gap:8px; padding:12px; }
+    #overlay h1 { font-size:34px; }
+    #overlay p { font-size:13px; line-height:1.45; }
+    #overlay .help { font-size:12px; padding:7px 10px; line-height:1.55; }
+    #overlay button { font-size:19px; padding:8px 30px; margin-top:0; }
   }
   #overlay.hidden { display:none; }
   #overlay h1, .inked {
@@ -107,13 +116,13 @@
       <div id="overlay">
         <h1>퍼즐 버블</h1>
         <p>같은 색 구슬을 <b>3개 이상</b> 붙여서 터뜨리세요!<br>매달린 구슬까지 떨어뜨리면 보너스 점수 💥</p>
+        <button id="startBtn">시작하기</button>
         <div class="help">
           🖱️ 마우스로 조준 · 클릭 발사<br>
           📱 드래그로 조준 · 손을 떼면 발사<br>
           ⌨️ ← → 조준 · Space 발사 · ↓ 구슬 교체<br>
           NEXT 구슬을 누르면 바꿀 수 있어요
         </div>
-        <button id="startBtn">시작하기</button>
       </div>
     </div>
   </div>
