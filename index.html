@@ -100,6 +100,9 @@
     box-shadow:0 6px 0 var(--ink); cursor:pointer;
   }
   #overlay button:active { transform:translateY(4px); box-shadow:0 2px 0 var(--ink); }
+  /* 기기에 맞는 설명만: 폰(손가락)은 .touch, PC(마우스·키보드)는 .pc */
+  .pc { display:none; }
+  @media (pointer:fine) { .pc { display:inline; } .touch { display:none; } }
 </style>
 </head>
 <body>
@@ -123,9 +126,8 @@
         <p>같은 색 구슬을 <b>3개 이상</b> 붙여서 터뜨리세요!<br>매달린 구슬까지 떨어뜨리면 보너스 점수 💥</p>
         <button id="startBtn">시작하기</button>
         <div class="help">
-          🖱️ 마우스로 조준 · 클릭 발사<br>
-          📱 드래그로 조준 · 손을 떼면 발사<br>
-          ⌨️ ← → 조준 · Space 발사 · ↓ 구슬 교체<br>
+          <span class="pc">🖱️ 마우스로 조준 · 클릭 발사<br>⌨️ ← → 조준 · Space 발사 · ↓ 구슬 교체<br></span>
+          <span class="touch">👆 끌어서 조준 · 손을 떼면 발사<br></span>
           NEXT 구슬을 누르면 바꿀 수 있어요
         </div>
       </div>
