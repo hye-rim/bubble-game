@@ -1,26 +1,10 @@
 'use strict';
 
-// ---------- Board geometry ----------
-// 육각 격자: 짝수 행 8칸, 홀수 행은 반 칸 밀려서 7칸.
-const R = 20;                      // 구슬 반지름
-const D = R * 2;
-const COLS = 8;
-const ROW_H = R * Math.sqrt(3);    // 육각 격자 행 간격
-const W = COLS * D;                // 320
-const TOP = 20;                    // 천장 판 두께 (처음)
-const DEAD_ROWS = 12;              // 이 줄을 넘으면 게임 오버
-const MAX_ROWS = DEAD_ROWS + 1;
-const DEAD_Y = TOP + R + (DEAD_ROWS - 1) * ROW_H + R + 2;
-const LX = W / 2;                  // 발사대 위치
-const LY = DEAD_Y + 34;
-const H = Math.round(LY + 30);
+// 보글보글: 화면·입력·소리. 규칙(격자·쏘기·터뜨리기·천장·스테이지)은 logic.js (LOGIC_BUBBLE) 에 있고,
+// 여기서는 규칙이 남긴 st.events 를 보고 소리·터지는 효과·글씨·안내창을 만든다.
+const L = LOGIC_BUBBLE;
+const { R, ROW_H, W, H, DEAD_Y, LX, LY, AUTO_FIRE, AUTO_WARN, cellX } = L;
 const NEXT_X = 46, NEXT_Y = LY + 6;
-
-const SPEED = 900;                 // px/s
-const MIN_ANGLE = Math.PI * 0.06;
-const MAX_ANGLE = Math.PI * 0.94;
-const AUTO_FIRE = 10;              // 이 시간(초) 동안 안 쏘면 자동 발사
-const AUTO_WARN = 5;               // 자동 발사 전 카운트다운 시작
 
 const COLORS = [
   { base: '#ff4d6d', hi: '#ffc2cc', lo: '#a3122f' }, // red
@@ -88,316 +72,96 @@ const sfx = {
   over: () => [392, 330, 262, 196].forEach((f, i) => setTimeout(() => tone(f, 0.25, 'triangle', 0.1), i * 180)),
 };
 
-// ---------- Grid helpers ----------
-const colsIn = (r) => (r % 2 ? COLS - 1 : COLS);
-const inBounds = (r, c) => r >= 0 && r < MAX_ROWS && c >= 0 && c < colsIn(r);
-const cellX = (r, c) => R + c * D + (r % 2 ? R : 0);
-const ceilY = () => TOP + drops * ROW_H;
-const cellY = (r) => ceilY() + R + r * ROW_H;
-
-function neighbors(r, c) {
-  const odd = r % 2;
-  const list = odd
-    ? [[r - 1, c], [r - 1, c + 1], [r, c - 1], [r, c + 1], [r + 1, c], [r + 1, c + 1]]
-    : [[r - 1, c - 1], [r - 1, c], [r, c - 1], [r, c + 1], [r + 1, c - 1], [r + 1, c]];
-  return list.filter(([a, b]) => inBounds(a, b));
-}
-
-function emptyGrid() {
-  return Array.from({ length: MAX_ROWS }, (_, r) => new Array(colsIn(r)).fill(-1));
-}
-
-function forEachBubble(fn) {
-  for (let r = 0; r < MAX_ROWS; r++)
-    for (let c = 0; c < colsIn(r); c++)
-      if (grid[r][c] >= 0) fn(r, c, grid[r][c]);
-}
-
-function colorsOnBoard() {
-  const set = new Set();
-  forEachBubble((r, c, col) => set.add(col));
-  return [...set];
-}
-
-function sameColorGroup(r0, c0) {
-  const color = grid[r0][c0];
-  const seen = new Set([r0 * 16 + c0]);
-  const stack = [[r0, c0]], out = [];
-  while (stack.length) {
-    const [r, c] = stack.pop();
-    out.push([r, c]);
-    for (const [a, b] of neighbors(r, c)) {
-      const k = a * 16 + b;
-      if (!seen.has(k) && grid[a][b] === color) { seen.add(k); stack.push([a, b]); }
-    }
-  }
-  return out;
-}
-
-// 천장(0행)에 이어지지 않은 구슬들
-function floatingBubbles() {
-  const seen = new Set();
-  const stack = [];
-  for (let c = 0; c < colsIn(0); c++) if (grid[0][c] >= 0) { seen.add(c); stack.push([0, c]); }
-  while (stack.length) {
-    const [r, c] = stack.pop();
-    for (const [a, b] of neighbors(r, c)) {
-      const k = a * 16 + b;
-      if (!seen.has(k) && grid[a][b] >= 0) { seen.add(k); stack.push([a, b]); }
-    }
-  }
-  const out = [];
-  forEachBubble((r, c) => { if (!seen.has(r * 16 + c)) out.push([r, c]); });
-  return out;
-}
-
-// ---------- Stage generation ----------
-const SHAPES = [
-  () => true,                                                           // 꽉 찬 벽
-  (r, c, x) => Math.abs(x - W / 2) <= W / 2 - r * R * 0.9 + 2,          // 역삼각형
-  (r, c, x) => r < 2 || Math.floor(x / (D * 2)) % 2 === 0,              // 기둥
-  (r, c, x, rows) => r < rows - 1 - Math.round(1.5 + 1.5 * Math.sin(x / 38)), // 물결
-  (r, c) => !(r % 3 === 2 && c % 3 === 1),                              // 구멍 숭숭
-  (r, c, x) => r < 2 || Math.abs(x - W / 2) > r * R * 0.7,              // V 자
-];
-
-function makeStage(n) {
-  const nColors = Math.min(3 + Math.floor((n - 1) / 2), n >= 10 ? 7 : 6);
-  const rows = Math.min(4 + Math.floor((n - 1) / 2), 8);
-  const shape = SHAPES[(n - 1) % SHAPES.length];
-  const palette = shuffle([...COLORS.keys()]).slice(0, nColors);
-  grid = emptyGrid();
-  drops = 0;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < colsIn(r); c++) {
-      if (!shape(r, c, cellX(r, c), rows)) continue;
-      // 이웃 색을 이어받아 뭉치게 만든다 → 연쇄를 노릴 만한 판
-      const near = neighbors(r, c).map(([a, b]) => grid[a][b]).filter((v) => v >= 0);
-      grid[r][c] = near.length && Math.random() < 0.5
-        ? near[Math.floor(Math.random() * near.length)]
-        : palette[Math.floor(Math.random() * palette.length)];
-    }
-  }
-  for (const [r, c] of floatingBubbles()) grid[r][c] = -1;
-}
-
-function shuffle(a) {
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function randomColor() {
-  const on = colorsOnBoard();
-  return on.length ? on[Math.floor(Math.random() * on.length)] : Math.floor(Math.random() * 3);
-}
-
 // ---------- Game state ----------
 let state = 'title';   // title | play | clear | over | paused
-let grid = emptyGrid();
-let drops = 0;
-let stage = 1, score = 0, best = Number(store.get('bubbleBest')) || 0;
-let shotsPerDrop = 8, shotsSinceDrop = 0;
-let cur = 0, nxt = 0;
-let angle = Math.PI / 2;
-let flying = null;
-let idle = 0;
+let best = Number(store.get('bubbleBest')) || 0;
+let G = L.newGame();   // 타이틀 화면 뒤에 깔아둘 판
 let shake = 0;
 let clearTimer = 0;
-let pops = [], falls = [], texts = [], sparks = [];
+let pops = [], falls = [], texts = [];
 let keys = {};
 
 function startGame() {
-  stage = 1;
-  score = 0;
-  loadStage();
+  G = L.newGame();
+  enterStage();
 }
-
-function loadStage() {
-  makeStage(stage);
-  shotsPerDrop = Math.max(5, 9 - Math.floor((stage - 1) / 2));
-  shotsSinceDrop = 0;
-  flying = null;
-  idle = 0;
-  cur = randomColor();
-  nxt = randomColor();
-  angle = Math.PI / 2;
+function nextStage() {
+  L.nextStage(G);
+  enterStage();
+}
+function enterStage() {
   state = 'play';
   hideOverlay();
   updateHud();
 }
 
 function updateHud() {
-  $('score').textContent = score.toLocaleString();
-  $('stageNo').textContent = stage;
-  if (score > best) { best = score; store.set('bubbleBest', String(best)); }
+  $('score').textContent = G.score.toLocaleString();
+  $('stageNo').textContent = G.stage;
+  if (G.score > best) { best = G.score; store.set('bubbleBest', String(best)); }
   $('best').textContent = best.toLocaleString();
 }
 
-// ---------- Shooting ----------
-function fire() {
-  if (state !== 'play' || flying) return;
-  flying = { x: LX, y: LY, vx: Math.cos(angle), vy: -Math.sin(angle), color: cur };
-  cur = nxt;
-  nxt = randomColor();
-  idle = 0;
-  sfx.shoot();
-}
+function fire() { if (state === 'play') { L.fire(G); handleEvents(); } }
+function swap() { if (state === 'play') { L.swap(G); handleEvents(); } }
 
-function swap() {
-  if (state !== 'play' || flying || cur === nxt) return;
-  [cur, nxt] = [nxt, cur];
-  sfx.swap();
-}
-
-function hitsBubble(x, y) {
-  const top = ceilY() + R;
-  const rMin = Math.max(0, Math.floor((y - top) / ROW_H) - 1);
-  const rMax = Math.min(MAX_ROWS - 1, rMin + 3);
-  for (let r = rMin; r <= rMax; r++) {
-    const cy = top + r * ROW_H;
-    for (let c = 0; c < colsIn(r); c++) {
-      if (grid[r][c] < 0) continue;
-      const dx = x - cellX(r, c), dy = y - cy;
-      if (dx * dx + dy * dy < (D * 0.86) ** 2) return true;
-    }
-  }
-  return false;
-}
-
-// 한 걸음 이동. 벽에 튕기면 true 를 돌려준다.
-function advance(b, s) {
-  b.x += b.vx * s;
-  b.y += b.vy * s;
-  if (b.x < R) { b.x = 2 * R - b.x; b.vx = -b.vx; return true; }
-  if (b.x > W - R) { b.x = 2 * (W - R) - b.x; b.vx = -b.vx; return true; }
-  return false;
-}
-
-const landed = (b) => b.y - R <= ceilY() || hitsBubble(b.x, b.y);
-
-function updateFlying(dt) {
-  let dist = SPEED * dt;
-  while (dist > 0) {
-    const s = Math.min(4, dist);
-    dist -= s;
-    if (advance(flying, s)) sfx.bounce();
-    if (landed(flying)) { stick(flying); flying = null; return; }
-  }
-}
-
-// 부딪힌 자리에서 가장 가까운 빈 칸(천장이나 다른 구슬에 붙어 있는)을 고른다.
-function snapCell(x, y) {
-  const r0 = Math.min(MAX_ROWS - 1, Math.max(0, Math.round((y - ceilY() - R) / ROW_H)));
-  const c0 = Math.min(colsIn(r0) - 1, Math.max(0, Math.round((x - R - (r0 % 2 ? R : 0)) / D)));
-  const cands = [[r0, c0], ...neighbors(r0, c0)];
-  for (const [a, b] of neighbors(r0, c0)) cands.push(...neighbors(a, b));
-  const attached = (r, c) => r === 0 || neighbors(r, c).some(([a, b]) => grid[a][b] >= 0);
-  let bestCell = null, bestD = Infinity;
-  for (const pass of [true, false]) {
-    for (const [r, c] of cands) {
-      if (grid[r][c] >= 0 || (pass && !attached(r, c))) continue;
-      const d = (x - cellX(r, c)) ** 2 + (y - cellY(r)) ** 2;
-      if (d < bestD) { bestD = d; bestCell = [r, c]; }
-    }
-    if (bestCell) return bestCell;
-  }
-  return [r0, c0];
-}
-
-function stick(b) {
-  const [r, c] = snapCell(b.x, b.y);
-  grid[r][c] = b.color;
-  sfx.stick();
-
-  const group = sameColorGroup(r, c);
-  if (group.length >= 3) {
-    group.forEach(([a, bb], i) => {
-      pops.push({ x: cellX(a, bb), y: cellY(a), color: grid[a][bb], t: -i * 0.035 });
-      setTimeout(() => sfx.pop(Math.min(i, 10)), i * 35);
-      grid[a][bb] = -1;
-    });
-    let gained = group.length * 10;
-    const floating = floatingBubbles();
-    if (floating.length) {
-      floating.forEach(([a, bb]) => {
-        falls.push({ x: cellX(a, bb), y: cellY(a), vx: (Math.random() - 0.5) * 160, vy: -Math.random() * 200, color: grid[a][bb], delay: 0 });
-        grid[a][bb] = -1;
+// 규칙이 남긴 일들 → 소리·효과·글씨·안내창
+function handleEvents() {
+  if (!G.events.length) return;
+  for (const e of G.events.splice(0)) {
+    if (e.type === 'shoot') sfx.shoot();
+    else if (e.type === 'swap') sfx.swap();
+    else if (e.type === 'bounce') sfx.bounce();
+    else if (e.type === 'stick') sfx.stick();
+    else if (e.type === 'pop') {
+      e.cells.forEach((p, i) => {
+        pops.push({ x: p.x, y: p.y, color: p.color, t: -i * 0.035 });
+        setTimeout(() => sfx.pop(Math.min(i, 10)), i * 35);
       });
-      // 떨어뜨린 개수만큼 두 배씩 불어나는 보너스 (원작 규칙). 원작의 17개 상한은 점수가 너무 튀어서 12개로 낮췄다.
-      const bonus = 10 * 2 ** Math.min(floating.length, 12);
-      gained += bonus;
-      texts.push({ x: cellX(r, c), y: cellY(r) + 24, text: `${floating.length}개 낙하! +${bonus.toLocaleString()}`, t: 0, big: true });
+      texts.push({ x: e.x, y: e.y, text: `+${e.gain.toLocaleString()}`, t: 0 });
+    } else if (e.type === 'drop') {
+      for (const p of e.cells) falls.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 160, vy: -Math.random() * 200, color: p.color, delay: 0 });
+      texts.push({ x: e.x, y: e.y + 24, text: `${e.cells.length}개 낙하! +${e.bonus.toLocaleString()}`, t: 0, big: true });
       setTimeout(sfx.drop, 120);
-    }
-    texts.push({ x: cellX(r, c), y: cellY(r), text: `+${(group.length * 10).toLocaleString()}`, t: 0 });
-    score += gained;
-  }
-
-  // 팔레트에서 사라진 색은 대기 구슬에서도 뺀다
-  const on = colorsOnBoard();
-  if (!on.length) { stageClear(); return; }
-  if (!on.includes(cur)) cur = randomColor();
-  if (!on.includes(nxt)) nxt = randomColor();
-
-  shotsSinceDrop++;
-  if (shotsSinceDrop >= shotsPerDrop) {
-    shotsSinceDrop = 0;
-    drops++;
-    shake = 0.35;
-    sfx.ceiling();
+    } else if (e.type === 'ceiling') { shake = 0.35; sfx.ceiling(); }
+    else if (e.type === 'over') gameOver(e.cells);
+    else if (e.type === 'clear') stageClear(e.bonus);
   }
   updateHud();
-  checkGameOver();
 }
 
-function checkGameOver() {
-  let dead = false;
-  forEachBubble((r) => { if (r + drops >= DEAD_ROWS) dead = true; });
-  if (!dead) return;
+function gameOver(cells) {
   state = 'over';
   sfx.over();
-  let i = 0;
-  forEachBubble((r, c, col) => {
-    falls.push({ x: cellX(r, c), y: cellY(r), vx: (Math.random() - 0.5) * 120, vy: -80, color: col, delay: (MAX_ROWS - r) * 0.06 + (i++ % 3) * 0.02, grey: true });
-    grid[r][c] = -1;
+  cells.forEach((p, i) => {
+    falls.push({ x: p.x, y: p.y, vx: (Math.random() - 0.5) * 120, vy: -80, color: p.color, delay: (L.MAX_ROWS - p.r) * 0.06 + (i % 3) * 0.02, grey: true });
   });
-  updateHud();
   setTimeout(() => showOverlay(`
     <h2 class="inked">GAME OVER</h2>
-    <p class="big inked">${score.toLocaleString()}점</p>
-    <p>STAGE ${stage}까지 도달${score >= best && score > 0 ? '<br>🏆 최고 기록!' : ''}</p>
+    <p class="big inked">${G.score.toLocaleString()}점</p>
+    <p>STAGE ${G.stage}까지 도달${G.score >= best && G.score > 0 ? '<br>🏆 최고 기록!' : ''}</p>
     <button id="startBtn">다시 하기</button>`), 1400);
 }
 
-function stageClear() {
-  const bonus = 1000 * stage;
-  score += bonus;
-  updateHud();
+function stageClear(bonus) {
   state = 'clear';
   clearTimer = 0;
   sfx.clear();
   showOverlay(`
-    <h2 class="inked">STAGE ${stage} CLEAR!</h2>
+    <h2 class="inked">STAGE ${G.stage} CLEAR!</h2>
     <p class="big inked">보너스 +${bonus.toLocaleString()}</p>
-    ${stage === 2 ? '<p>다음 스테이지부터 조준 가이드가<br><b>첫 번째 벽까지만</b> 보여요</p>' : ''}
-    ${stage === 5 ? '<p>다음 스테이지부터 조준 가이드가<br><b>방향만</b> 보여요</p>' : ''}
+    ${G.stage === 2 ? '<p>다음 스테이지부터 조준 가이드가<br><b>첫 번째 벽까지만</b> 보여요</p>' : ''}
+    ${G.stage === 5 ? '<p>다음 스테이지부터 조준 가이드가<br><b>방향만</b> 보여요</p>' : ''}
     <button id="startBtn">다음 스테이지 ▶</button>`);
 }
 
 // ---------- Update ----------
 function update(dt) {
   if (state === 'play') {
-    const turn = 1.9 * dt;
-    if (keys.ArrowLeft || keys.KeyA) angle += turn;
-    if (keys.ArrowRight || keys.KeyD) angle -= turn;
-    angle = Math.min(MAX_ANGLE, Math.max(MIN_ANGLE, angle));
-    if (flying) updateFlying(dt);
-    else if ((idle += dt) >= AUTO_FIRE) fire();
+    L.update(G, dt, { left: keys.ArrowLeft || keys.KeyA, right: keys.ArrowRight || keys.KeyD });
+    handleEvents();
   }
-  if (state === 'clear' && (clearTimer += dt) > 2.5) { stage++; loadStage(); }
+  if (state === 'clear' && (clearTimer += dt) > 2.5) nextStage();
 
   shake = Math.max(0, shake - dt);
   for (const p of pops) p.t += dt;
@@ -412,24 +176,6 @@ function update(dt) {
   falls = falls.filter((f) => f.y < H + R * 2);
   for (const t of texts) { t.t += dt; t.y -= 30 * dt; }
   texts = texts.filter((t) => t.t < 1.1);
-}
-
-// ---------- Aim guide ----------
-// 스테이지가 오를수록 가이드가 짧아진다.
-// 1~2: 반사 포함 착지점까지 / 3~5: 첫 벽까지만 / 6~: 발사대 앞 방향만
-function aimPath() {
-  const maxBounces = stage <= 2 ? 2 : 0;
-  const maxTravel = stage <= 5 ? Infinity : 130;
-  const b = { x: LX, y: LY, vx: Math.cos(angle), vy: -Math.sin(angle) };
-  const pts = [];
-  let bounces = 0, travelled = 0;
-  for (let i = 0; i < 400; i++) {
-    if (advance(b, 5) && ++bounces > maxBounces) break;
-    if ((travelled += 5) > maxTravel) break;
-    if (landed(b)) break;
-    if (travelled % 20 === 0 && travelled > 30) pts.push([b.x, b.y]);
-  }
-  return pts;
 }
 
 // ---------- Drawing (작은 오락실 공통 스티커 스타일: 진한 테두리 + 아래 그림자 + Jua) ----------
@@ -498,13 +244,13 @@ function drawBackground() {
 }
 
 function drawCeiling() {
-  const y = ceilY();
+  const y = L.ceilY(G);
   // 노란 천장 판 + 볼트, 아래 끝에 경고 줄무늬
   ctx.fillStyle = '#ffd23f';
   ctx.fillRect(0, 0, W, y);
   ctx.fillStyle = 'rgba(255,255,255,.35)';
   ctx.fillRect(0, 0, W, Math.min(6, y));
-  for (let row = 0; row <= drops; row++) {
+  for (let row = 0; row <= G.drops; row++) {
     const by = 9 + row * ROW_H;
     if (by > y - 12) break;
     for (let x = 16; x < W; x += 40) {
@@ -536,13 +282,13 @@ function drawDeadline() {
 
 function drawLauncher() {
   // 조준 가이드: 테두리 두른 점
-  if (state === 'play' && !flying) {
-    const pts = aimPath();
+  if (state === 'play' && !G.flying) {
+    const pts = L.aimPath(G);
     pts.forEach(([x, y], i) => {
       ctx.globalAlpha = Math.max(0.2, 0.95 - i * 0.03);
       ctx.fillStyle = INK;
       ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = COLORS[cur].base;
+      ctx.fillStyle = COLORS[G.cur].base;
       ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     });
     ctx.globalAlpha = 1;
@@ -558,7 +304,7 @@ function drawLauncher() {
   // 화살표
   ctx.save();
   ctx.translate(LX, LY);
-  ctx.rotate(-angle);
+  ctx.rotate(-G.angle);
   ctx.fillStyle = '#ffd23f';
   ctx.strokeStyle = INK;
   ctx.lineWidth = 2.5;
@@ -577,14 +323,14 @@ function drawLauncher() {
   ctx.restore();
 
   if (state === 'play' || state === 'paused') {
-    if (!flying) drawBubble(LX, LY, cur);
+    if (!G.flying) drawBubble(LX, LY, G.cur);
     // NEXT: 흰 말풍선
     panel(NEXT_X - 26, NEXT_Y - 36, 52, 58, 16, '#ffffff', 3);
     label('NEXT', NEXT_X, NEXT_Y - 24, 11, INK, 'center', null);
-    drawBubble(NEXT_X, NEXT_Y + 2, nxt, 0.8);
+    drawBubble(NEXT_X, NEXT_Y + 2, G.nxt, 0.8);
 
     // 천장이 내려오기까지 남은 발사 수
-    const left = shotsPerDrop - shotsSinceDrop;
+    const left = G.shotsPerDrop - G.shotsSinceDrop;
     panel(W - 72, NEXT_Y - 36, 52, 58, 16, left <= 2 ? '#ffd0da' : '#ffffff', 3);
     label('천장', W - 46, NEXT_Y - 24, 11, INK, 'center', null);
     label(`${left}`, W - 46, NEXT_Y + 4, 22, left <= 2 ? '#ff3b5c' : '#ffd23f');
@@ -595,14 +341,14 @@ function draw() {
   ctx.save();
   if (shake > 0) ctx.translate((Math.random() - 0.5) * 6 * shake / 0.35, 0);
   // 천장 내려오기 두 발 전부터 부들부들
-  const warn = state === 'play' && shotsPerDrop - shotsSinceDrop <= 1;
+  const warn = state === 'play' && G.shotsPerDrop - G.shotsSinceDrop <= 1;
   drawBackground();
   drawDeadline();
 
   ctx.save();
   if (warn) ctx.translate(Math.sin(performance.now() / 30) * 1.2, 0);
   drawCeiling();
-  forEachBubble((r, c, col) => drawBubble(cellX(r, c), cellY(r), col));
+  L.forEachBubble(G.grid, (r, c, col) => drawBubble(cellX(r, c), L.cellY(G, r), col));
   ctx.restore();
 
   for (const p of pops) {
@@ -626,7 +372,7 @@ function draw() {
     ctx.globalAlpha = 1;
   }
   for (const f of falls) drawBubble(f.x, f.y, f.color, 1, 1, f.grey);
-  if (flying) drawBubble(flying.x, flying.y, flying.color);
+  if (G.flying) drawBubble(G.flying.x, G.flying.y, G.flying.color);
 
   drawLauncher();
 
@@ -637,8 +383,8 @@ function draw() {
   ctx.globalAlpha = 1;
 
   // 자동 발사 카운트다운
-  if (state === 'play' && !flying && idle > AUTO_FIRE - AUTO_WARN) {
-    label(`${Math.ceil(AUTO_FIRE - idle)}`, LX, LY - 74, 44, '#ffd23f');
+  if (state === 'play' && !G.flying && G.idle > AUTO_FIRE - AUTO_WARN) {
+    label(`${Math.ceil(AUTO_FIRE - G.idle)}`, LX, LY - 74, 44, '#ffd23f');
   }
   ctx.restore();
 }
@@ -664,7 +410,7 @@ function showOverlay(html) {
 function hideOverlay() { $('overlay').classList.add('hidden'); }
 
 function onOverlayButton() {
-  if (state === 'clear') { stage++; loadStage(); }
+  if (state === 'clear') nextStage();
   else if (state === 'paused') resume();
   else startGame();
 }
@@ -687,7 +433,7 @@ function toLocal(e) {
 }
 function aimAt(x, y) {
   const a = Math.atan2(LY - y, x - LX);
-  angle = Math.min(MAX_ANGLE, Math.max(MIN_ANGLE, y > LY ? (x < LX ? MAX_ANGLE : MIN_ANGLE) : a));
+  L.aim(G, y > LY ? (x < LX ? L.MAX_ANGLE : L.MIN_ANGLE) : a);
 }
 const onNext = (x, y) => Math.hypot(x - NEXT_X, y - NEXT_Y) < R + 8;
 
@@ -699,7 +445,7 @@ canvas.addEventListener('pointerdown', (e) => {
   pointerAiming = true;
   try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
   aimAt(x, y);
-  idle = 0;
+  G.idle = 0;
 });
 canvas.addEventListener('pointermove', (e) => {
   if (state !== 'play') return;
@@ -748,8 +494,6 @@ $('pauseBtn').onclick = (e) => { e.currentTarget.blur(); state === 'paused' ? re
 $('startBtn').onclick = onOverlayButton;
 $('muteBtn').textContent = muted ? '🔇' : '🔊';
 
-// 타이틀 화면 뒤에 깔아둘 판
-makeStage(1);
 updateHud();
 fit();
 requestAnimationFrame(frame);
