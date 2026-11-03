@@ -6,6 +6,7 @@
 // - 천장에 이어지지 않게 된 구슬은 떨어지고, 떨어뜨린 개수만큼 두 배씩 불어나는 보너스
 // - 몇 번 쏠 때마다 천장이 한 줄 내려온다. 구슬이 맨 아래 줄을 넘으면 끝, 다 없애면 스테이지 클리어
 // - 10초 동안 안 쏘면 자동 발사
+// - 아이템 모드의 특수 구슬(번호 10 이상, 판에 남지 않고 붙는 즉시 효과를 내고 사라진다): 폭탄(주변 구슬 제거) · 무지개(이웃 중 가장 크게 터뜨릴 색이 된다) · 번개(그 줄 제거)
 // 소리·터지는 효과·글씨는 game.js 가 st.events 를 보고 만든다.
 const LOGIC_BUBBLE = (() => {
 // ---------- 판 ----------
@@ -29,6 +30,13 @@ const TURN_SPEED = 1.9;            // 키보드로 돌리는 속도 (rad/s)
 const AUTO_FIRE = 10;              // 이 시간(초) 동안 안 쏘면 자동 발사
 const AUTO_WARN = 5;               // 자동 발사 전 카운트다운 시작
 const N_COLORS = 7;
+
+// ---------- 특수 구슬 (아이템 모드) ----------
+const BOMB = 10, RAINBOW = 11, BOLT = 12;
+const isSpecial = (code) => code >= 10;
+const BOMB_RINGS = 1;              // 폭탄이 터지는 범위: 붙은 자리에서 이만큼 바깥 겹까지 (1 = 바로 둘러싼 6칸)
+const SPECIAL_GAP = [7, 11];       // 이만큼 쏠 때마다 한 번 특수 구슬이 NEXT 로 나온다 (최소, 최대)
+const SPECIAL_WEIGHTS = [[BOMB, 0.35], [RAINBOW, 0.4], [BOLT, 0.25]];
 
 // ---------- 격자 ----------
 const colsIn = (r) => (r % 2 ? COLS - 1 : COLS);
@@ -142,10 +150,22 @@ function randomColor(st) {
 }
 
 // ---------- 게임 ----------
-function newGame(rand = Math.random) {
-  const st = { rand, stage: 1, score: 0, grid: emptyGrid(), drops: 0, shotsPerDrop: 8, shotsSinceDrop: 0, cur: 0, nxt: 0, angle: Math.PI / 2, flying: null, idle: 0, phase: 'play', events: [] };
+function newGame(rand = Math.random, opts = {}) {
+  const st = { rand, items: !!opts.items, sinceSpecial: 0, specialGap: 0, stage: 1, score: 0, grid: emptyGrid(), drops: 0, shotsPerDrop: 8, shotsSinceDrop: 0, cur: 0, nxt: 0, angle: Math.PI / 2, flying: null, idle: 0, phase: 'play', events: [] };
+  st.specialGap = nextGap(st);
   loadStage(st);
   return st;
+}
+const nextGap = (st) => SPECIAL_GAP[0] + Math.floor(st.rand() * (SPECIAL_GAP[1] - SPECIAL_GAP[0] + 1));
+// 다음 구슬: 아이템 모드에서는 일정 발사 수마다 특수 구슬
+function pickNext(st) {
+  if (st.items && st.sinceSpecial >= st.specialGap) {
+    st.sinceSpecial = 0; st.specialGap = nextGap(st);
+    let x = st.rand();
+    for (const [code, w] of SPECIAL_WEIGHTS) { if ((x -= w) < 0) return code; }
+    return RAINBOW;
+  }
+  return randomColor(st);
 }
 
 function loadStage(st) {
@@ -157,6 +177,7 @@ function loadStage(st) {
   st.idle = 0;
   st.cur = randomColor(st);
   st.nxt = randomColor(st);
+  st.sinceSpecial = 0;
   st.angle = Math.PI / 2;
   st.phase = 'play';
 }
@@ -169,7 +190,8 @@ function fire(st) {
   if (st.phase !== 'play' || st.flying) return false;
   st.flying = { x: LX, y: LY, vx: Math.cos(st.angle), vy: -Math.sin(st.angle), color: st.cur };
   st.cur = st.nxt;
-  st.nxt = randomColor(st);
+  st.sinceSpecial++;
+  st.nxt = pickNext(st);
   st.idle = 0;
   st.events.push({ type: 'shoot' });
   return true;
@@ -242,34 +264,87 @@ function snapCell(st, x, y) {
 const dropBonus = (n) => 10 * 2 ** Math.min(n, 12);
 const at = (st, r, c) => ({ r, c, x: cellX(r, c), y: cellY(st, r), color: st.grid[r][c] });
 
+// 구슬들을 터뜨리고 점수를 준다. 이어서 천장에서 끊긴 구슬은 떨어지고 낙하 보너스. cells 는 [[r,c],…], (r,c) 는 효과가 난 자리
+function clearCells(st, cells, r, c, extra = {}) {
+  const grid = st.grid;
+  const popped = cells.map(([a, bb]) => at(st, a, bb));
+  for (const [a, bb] of cells) grid[a][bb] = -1;
+  let gained = cells.length * 10;
+  st.events.push({ type: 'pop', cells: popped, gain: gained, x: cellX(r, c), y: cellY(st, r), ...extra });
+  const floating = floatingBubbles(grid);
+  if (floating.length) {
+    const fell = floating.map(([a, bb]) => at(st, a, bb));
+    for (const [a, bb] of floating) grid[a][bb] = -1;
+    const bonus = dropBonus(floating.length);
+    gained += bonus;
+    st.events.push({ type: 'drop', cells: fell, bonus, x: cellX(r, c), y: cellY(st, r) });
+  }
+  st.score += gained;
+}
+
+// 무지개: 이웃한 색들 중 여기에 놓았을 때 가장 큰 덩어리가 되는 색으로 바뀐다. 이웃이 없으면(천장) 판에 남은 색 아무거나
+function rainbowColor(st, r, c) {
+  const grid = st.grid;
+  const cols = [...new Set(neighbors(r, c).map(([a, b]) => grid[a][b]).filter((v) => v >= 0))];
+  if (!cols.length) return randomColor(st);
+  let best = cols[0], bs = -1;
+  for (const col of cols) {
+    grid[r][c] = col;
+    const n = sameColorGroup(grid, r, c).length;
+    if (n > bs) { bs = n; best = col; }
+  }
+  grid[r][c] = -1;
+  return best;
+}
+
+// (r,c) 둘레 rings 겹 안의 칸들
+function ringCells(r, c, rings) {
+  const seen = new Set([r * 16 + c]);
+  let frontier = [[r, c]];
+  const out = [];
+  for (let k = 0; k < rings; k++) {
+    const nf = [];
+    for (const [a, b] of frontier) for (const [x, y] of neighbors(a, b)) {
+      const key = x * 16 + y;
+      if (seen.has(key)) continue;
+      seen.add(key); out.push([x, y]); nf.push([x, y]);
+    }
+    frontier = nf;
+  }
+  return out;
+}
+
+// 번개가 지우는 줄: 붙은 줄, 거기에 구슬이 없으면 바로 위 줄
+function boltRow(st, r) {
+  const has = (row) => row >= 0 && st.grid[row].some((v) => v >= 0);
+  return has(r) ? r : has(r - 1) ? r - 1 : r;
+}
+
 function stick(st, b) {
   const grid = st.grid;
   const [r, c] = snapCell(st, b.x, b.y);
-  grid[r][c] = b.color;
-  st.events.push({ type: 'stick', r, c });
+  let color = b.color;
+  if (color === RAINBOW) color = rainbowColor(st, r, c);
+  st.events.push({ type: 'stick', r, c, special: isSpecial(b.color) ? b.color : undefined, as: color });
 
-  const group = sameColorGroup(grid, r, c);
-  if (group.length >= 3) {
-    const popped = group.map(([a, bb]) => at(st, a, bb));
-    for (const [a, bb] of group) grid[a][bb] = -1;
-    let gained = group.length * 10;
-    st.events.push({ type: 'pop', cells: popped, gain: gained, x: cellX(r, c), y: cellY(st, r) });
-    const floating = floatingBubbles(grid);
-    if (floating.length) {
-      const fell = floating.map(([a, bb]) => at(st, a, bb));
-      for (const [a, bb] of floating) grid[a][bb] = -1;
-      const bonus = dropBonus(floating.length);
-      gained += bonus;
-      st.events.push({ type: 'drop', cells: fell, bonus, x: cellX(r, c), y: cellY(st, r) });
-    }
-    st.score += gained;
+  if (color === BOMB || color === BOLT) {
+    // 폭탄·번개는 판에 남지 않는다. 걸린 구슬이 하나도 없으면 그냥 사라진다
+    let cells;
+    if (color === BOMB) cells = ringCells(r, c, BOMB_RINGS).filter(([a, bb]) => grid[a][bb] >= 0);
+    else { const row = boltRow(st, r); cells = grid[row].map((v, cc) => [row, cc]).filter(([a, bb]) => grid[a][bb] >= 0); }
+    st.events.push({ type: 'special', kind: color, r, c, x: cellX(r, c), y: cellY(st, r), count: cells.length });
+    if (cells.length) clearCells(st, cells, r, c, { special: color });
+  } else {
+    grid[r][c] = color;
+    const group = sameColorGroup(grid, r, c);
+    if (group.length >= 3) clearCells(st, group, r, c, b.color === RAINBOW ? { special: RAINBOW } : {});
   }
 
-  // 팔레트에서 사라진 색은 대기 구슬에서도 뺀다
+  // 팔레트에서 사라진 색은 대기 구슬에서도 뺀다 (특수 구슬은 그대로 둔다)
   const on = colorsOnBoard(grid);
   if (!on.length) { stageClear(st); return; }
-  if (!on.includes(st.cur)) st.cur = randomColor(st);
-  if (!on.includes(st.nxt)) st.nxt = randomColor(st);
+  if (!isSpecial(st.cur) && !on.includes(st.cur)) st.cur = randomColor(st);
+  if (!isSpecial(st.nxt) && !on.includes(st.nxt)) st.nxt = randomColor(st);
 
   st.shotsSinceDrop++;
   if (st.shotsSinceDrop >= st.shotsPerDrop) {
@@ -330,6 +405,7 @@ return {
   R, D, COLS, ROW_H, W, H, TOP, DEAD_ROWS, MAX_ROWS, DEAD_Y, LX, LY, SPEED, MIN_ANGLE, MAX_ANGLE, TURN_SPEED, AUTO_FIRE, AUTO_WARN, N_COLORS, SHAPES,
   colsIn, inBounds, cellX, ceilY, cellY, neighbors, emptyGrid, forEachBubble, colorsOnBoard, sameColorGroup, floatingBubbles,
   stageColors, stageRows, shotsPerDropFor, makeStage, randomColor, newGame, loadStage, nextStage, aim, fire, swap,
+  BOMB, RAINBOW, BOLT, isSpecial, BOMB_RINGS, SPECIAL_GAP, ringCells, rainbowColor, boltRow, pickNext, clearCells,
   hitsBubble, advance, landed, updateFlying, snapCell, dropBonus, stick, checkGameOver, stageClear, update, aimPath,
 };
 })();

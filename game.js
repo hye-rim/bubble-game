@@ -70,21 +70,31 @@ const sfx = {
   drop: () => tone(700, 0.35, 'sine', 0.08, -500),
   ceiling: () => tone(90, 0.3, 'sawtooth', 0.08, -30),
   swap: () => tone(440, 0.05, 'sine', 0.06, 200),
+  boom: () => { tone(150, 0.4, 'sawtooth', 0.13, -90); tone(95, 0.45, 'square', 0.09, -50); },
+  bolt: () => { tone(1400, 0.18, 'sawtooth', 0.09, -1100); setTimeout(() => tone(900, 0.15, 'square', 0.07, -600), 60); },
+  rainbow: () => [523, 659, 784].forEach((f, i) => setTimeout(() => tone(f, 0.12, 'triangle', 0.1), i * 70)),
+  special: () => tone(660, 0.12, 'triangle', 0.08, 400),
   clear: () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, 0.18, 'square', 0.06), i * 110)),
   over: () => [392, 330, 262, 196].forEach((f, i) => setTimeout(() => tone(f, 0.25, 'triangle', 0.1), i * 180)),
 };
 
 // ---------- Game state ----------
 let state = 'title';   // title | play | clear | over | paused
-let best = Number(store.get('bubbleBest')) || 0;
+const BEST_KEY = { classic: 'bubbleBest', items: 'bubbleItemBest' };   // 기본 모드 기록은 로비가 보여 주는 bubbleBest 그대로
+let mode = 'classic', lastMode = 'classic';                       // classic | items (아이템 모드: 폭탄·무지개·번개 구슬)
+let best = Number(store.get(BEST_KEY.classic)) || 0;
 let G = L.newGame();   // 타이틀 화면 뒤에 깔아둘 판
 let shake = 0;
+let flashes = [];      // 번개·폭탄이 터질 때의 번쩍임
 let clearTimer = 0;
 let pops = [], falls = [], texts = [];
 let keys = {};
 
-function startGame() {
-  G = L.newGame();
+function startGame(m) {
+  mode = m === 'items' ? 'items' : 'classic';
+  lastMode = mode;
+  best = Number(store.get(BEST_KEY[mode])) || 0;
+  G = L.newGame(Math.random, { items: mode === 'items' });
   enterStage();
 }
 function nextStage() {
@@ -100,7 +110,7 @@ function enterStage() {
 function updateHud() {
   $('score').textContent = G.score.toLocaleString();
   $('stageNo').textContent = G.stage;
-  if (G.score > best) { best = G.score; store.set('bubbleBest', String(best)); }
+  if (G.score > best) { best = G.score; store.set(BEST_KEY[mode], String(best)); }
   $('best').textContent = best.toLocaleString();
 }
 
@@ -115,8 +125,12 @@ function handleEvents() {
     if (e.type === 'shoot') sfx.shoot();
     else if (e.type === 'swap') sfx.swap();
     else if (e.type === 'bounce') sfx.bounce();
-    else if (e.type === 'stick') sfx.stick();
-    else if (e.type === 'pop') {
+    else if (e.type === 'stick') { sfx.stick(); if (e.special === L.RAINBOW) { sfx.rainbow(); texts.push({ x: cellX(e.r, e.c), y: L.cellY(G, e.r), text: '🌈', t: 0, big: true }); } }
+    else if (e.type === 'special') {
+      if (e.kind === L.BOMB) { shake = 0.35; sfx.boom(); flashes.push({ kind: 'bomb', x: e.x, y: e.y, t: 0 }); }
+      else if (e.kind === L.BOLT) { shake = 0.25; sfx.bolt(); flashes.push({ kind: 'bolt', y: e.y, t: 0 }); }
+      texts.push({ x: e.x, y: e.y - 26, text: e.count ? `${e.kind === L.BOMB ? '💣 펑!' : '⚡ 번쩍!'} ${e.count}개` : (e.kind === L.BOMB ? '💣 불발' : '⚡ 불발'), t: 0, big: true });
+    } else if (e.type === 'pop') {
       e.cells.forEach((p, i) => {
         pops.push({ x: p.x, y: p.y, color: p.color, t: -i * 0.035 });
         setTimeout(() => sfx.pop(Math.min(i, 10)), i * 35);
@@ -142,8 +156,9 @@ function gameOver(cells) {
   setTimeout(() => showOverlay(`
     <h2 class="inked">GAME OVER</h2>
     <p class="big inked">${G.score.toLocaleString()}점</p>
-    <p>STAGE ${G.stage}까지 도달${G.score >= best && G.score > 0 ? '<br>🏆 최고 기록!' : ''}</p>
-    <button id="startBtn">다시 하기</button>`), 1400);
+    <p>${mode === 'items' ? '🎁 아이템 모드 · ' : ''}STAGE ${G.stage}까지 도달${G.score >= best && G.score > 0 ? '<br>🏆 최고 기록!' : ''}</p>
+    <button id="startBtn" data-mode="${mode}">다시 하기</button>
+    <button id="otherBtn" class="sub" data-mode="${mode === 'items' ? 'classic' : 'items'}">${mode === 'items' ? '기본 모드로' : '🎁 아이템 모드로'}</button>`), 1400);
 }
 
 function stageClear(bonus) {
@@ -167,6 +182,8 @@ function update(dt) {
   if (state === 'clear' && (clearTimer += dt) > 2.5) nextStage();
 
   shake = Math.max(0, shake - dt);
+  for (const f of flashes) f.t += dt;
+  flashes = flashes.filter((f) => f.t < 0.35);
   for (const p of pops) p.t += dt;
   pops = pops.filter((p) => p.t < 0.3);
   for (const f of falls) {
@@ -207,7 +224,43 @@ function label(text, x, y, size, fill = '#fff', align = 'center', stroke = INK) 
   ctx.fillStyle = fill; ctx.fillText(text, x, y);
 }
 
+// 특수 구슬 그림: 폭탄(까만 몸+도화선) · 무지개(여섯 빛깔 부채꼴) · 번개(노란 몸+번개 무늬)
+function drawSpecialBubble(x, y, code, scale = 1, alpha = 1) {
+  const r = R * scale - 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(x, y + 1.5, r + 0.5, 0, Math.PI * 2); ctx.fill();
+  if (code === L.RAINBOW) {
+    const cols = ['#ff4d6d', '#ff9f1c', '#ffd93d', '#4cd964', '#3fa7ff', '#b066ff'];
+    const spin = performance.now() / 1200;
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = cols[i];
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, r - 1, spin + (i / 6) * Math.PI * 2, spin + ((i + 1) / 6) * Math.PI * 2); ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, r * 0.26, 0, Math.PI * 2); ctx.fill();
+  } else if (code === L.BOLT) {
+    const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.4, r * 0.1, x, y, r);
+    g.addColorStop(0, '#fff6a8'); g.addColorStop(0.5, '#ffd93d'); g.addColorStop(1, '#d99a00');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = INK; ctx.beginPath();
+    ctx.moveTo(x + r * 0.12, y - r * 0.68); ctx.lineTo(x - r * 0.42, y + r * 0.08); ctx.lineTo(x - r * 0.02, y + r * 0.08);
+    ctx.lineTo(x - r * 0.16, y + r * 0.7); ctx.lineTo(x + r * 0.44, y - r * 0.12); ctx.lineTo(x + r * 0.04, y - r * 0.12);
+    ctx.closePath(); ctx.fill();
+  } else {
+    ctx.fillStyle = '#2a2a38'; ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(x - r * 0.35, y - r * 0.4, r * 0.24, r * 0.14, -0.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#b08850'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x + r * 0.2, y - r * 0.85); ctx.quadraticCurveTo(x + r * 0.5, y - r * 1.2, x + r * 0.8, y - r * 1.05); ctx.stroke();
+    const f = 0.7 + 0.3 * Math.sin(performance.now() / 70);
+    ctx.fillStyle = '#ffd23f'; ctx.beginPath(); ctx.arc(x + r * 0.82, y - r * 1.07, 4.5 * f, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ff5a1a'; ctx.beginPath(); ctx.arc(x + r * 0.82, y - r * 1.07, 2.4 * f, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.lineWidth = 2; ctx.strokeStyle = INK; ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
 function drawBubble(x, y, color, scale = 1, alpha = 1, grey = false) {
+  if (L.isSpecial(color)) { drawSpecialBubble(x, y, color, scale, alpha); return; }
   const col = grey ? { base: '#8d88a8', hi: '#d3cfe6', lo: '#57527a' } : COLORS[color];
   const r = R * scale - 1;
   ctx.save();
@@ -291,7 +344,7 @@ function drawLauncher() {
       ctx.globalAlpha = Math.max(0.2, 0.95 - i * 0.03);
       ctx.fillStyle = INK;
       ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = COLORS[G.cur].base;
+      ctx.fillStyle = L.isSpecial(G.cur) ? '#ffffff' : COLORS[G.cur].base;
       ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     });
     ctx.globalAlpha = 1;
@@ -374,6 +427,21 @@ function draw() {
     ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
   }
+  for (const f of flashes) {
+    const k = f.t / 0.35, a = Math.max(0, 1 - k);
+    ctx.save(); ctx.globalAlpha = a;
+    if (f.kind === 'bolt') {
+      ctx.fillStyle = '#fffbd0'; ctx.fillRect(0, f.y - R * (0.9 - k * 0.5), W, R * 1.8 * (1 - k * 0.5));
+      ctx.strokeStyle = '#ffd93d'; ctx.lineWidth = 4; ctx.lineJoin = 'round'; ctx.beginPath();
+      for (let x = 0; x <= W; x += 20) { const yy = f.y + Math.sin(x * 0.7 + f.t * 40) * 9; x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = '#ff9f1c'; ctx.lineWidth = 7 * (1 - k) + 1;
+      ctx.beginPath(); ctx.arc(f.x, f.y, R * (0.8 + k * 3.2), 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,230,140,.6)'; ctx.beginPath(); ctx.arc(f.x, f.y, R * (0.6 + k * 2.2), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
   for (const f of falls) drawBubble(f.x, f.y, f.color, 1, 1, f.grey);
   if (G.flying) drawBubble(G.flying.x, G.flying.y, G.flying.color);
 
@@ -407,15 +475,14 @@ function showOverlay(html) {
   const o = $('overlay');
   o.innerHTML = html;
   o.classList.remove('hidden');
-  const btn = $('startBtn');
-  if (btn) btn.onclick = onOverlayButton;
+  o.querySelectorAll('button').forEach((b) => { b.onclick = onOverlayButton; });
 }
 function hideOverlay() { $('overlay').classList.add('hidden'); }
 
-function onOverlayButton() {
+function onOverlayButton(e) {
   if (state === 'clear') nextStage();
   else if (state === 'paused') resume();
-  else startGame();
+  else startGame((e && e.currentTarget && e.currentTarget.dataset && e.currentTarget.dataset.mode) || lastMode);   // 단추에 적힌 모드로, 키보드로 누르면 마지막 모드로
 }
 
 function pause() {
@@ -495,6 +562,7 @@ function toggleMute() {
 $('muteBtn').onclick = (e) => { e.currentTarget.blur(); toggleMute(); };
 $('pauseBtn').onclick = (e) => { e.currentTarget.blur(); state === 'paused' ? resume() : pause(); };
 $('startBtn').onclick = onOverlayButton;
+$('itemBtn').onclick = onOverlayButton;
 $('muteBtn').textContent = muted ? '🔇' : '🔊';
 
 updateHud();

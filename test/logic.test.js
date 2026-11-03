@@ -188,3 +188,129 @@ test('an aiming bot clears the first three stages', () => {
     }
   }
 });
+
+// ---------- 아이템 모드: 특수 구슬 ----------
+// (r,c) 칸에 특수 구슬을 직접 붙인다 (그 칸 위치로 쏜 것처럼)
+const stickAt = (st, color, r, c) => { st.events.length = 0; L.stick(st, { x: L.cellX(r, c), y: L.cellY(st, r), color }); };
+const put = (st, list) => { for (const [r, c, col] of list) st.grid[r][c] = col; };
+const popOf = (st) => st.events.find((e) => e.type === 'pop');
+
+test('special codes sit above the colours and never count as board colours', () => {
+  assert.ok(L.isSpecial(L.BOMB) && L.isSpecial(L.RAINBOW) && L.isSpecial(L.BOLT));
+  assert.ok(!L.isSpecial(0) && !L.isSpecial(L.N_COLORS - 1));
+  assert.ok(L.BOMB >= L.N_COLORS && L.RAINBOW >= L.N_COLORS && L.BOLT >= L.N_COLORS);
+});
+
+test('specials only come in item mode, once every few shots', () => {
+  const classic = L.newGame(rng(2));
+  let seen = 0;
+  for (let i = 0; i < 300; i++) { L.fire(classic); classic.flying = null; if (L.isSpecial(classic.nxt) || L.isSpecial(classic.cur)) seen++; }
+  assert.strictEqual(seen, 0, 'never in the normal mode');
+
+  const items = L.newGame(rng(2), { items: true });
+  const gaps = []; let since = 0;
+  for (let i = 0; i < 400; i++) {
+    const before = items.nxt;
+    L.fire(items); items.flying = null; since++;
+    if (L.isSpecial(items.nxt) && !L.isSpecial(before)) { gaps.push(since); since = 0; }
+  }
+  assert.ok(gaps.length > 25);
+  assert.ok(gaps.every((g) => g >= L.SPECIAL_GAP[0] - 1 && g <= L.SPECIAL_GAP[1] + 1), `gaps ${gaps.slice(0, 8)}`);
+  const kinds = new Set(); const r = rng(9); const st = L.newGame(r, { items: true });
+  for (let i = 0; i < 500; i++) { st.sinceSpecial = 99; const n = L.pickNext(st); if (L.isSpecial(n)) kinds.add(n); }
+  assert.deepStrictEqual([...kinds].sort(), [L.BOMB, L.RAINBOW, L.BOLT].sort());
+});
+
+test('a bomb pops the bubbles around where it lands and nothing further; it leaves no bubble behind', () => {
+  const st = emptyBoard();
+  put(st, [[0, 3, 0], [0, 4, 1], [1, 3, 2], [1, 2, 3], [2, 3, 4], [0, 0, 5]]);      // (1,3) 둘레와 멀리 떨어진 (0,0)
+  stickAt(st, L.BOMB, 2, 2);
+  const pop = popOf(st);
+  assert.ok(pop && pop.special === L.BOMB);
+  const around = L.ringCells(2, 2, L.BOMB_RINGS).filter(([a, b]) => [[1, 2], [1, 1], [2, 3], [1, 3]].some(([x, y]) => x === a && y === b));
+  assert.ok(around.length >= 1);
+  assert.strictEqual(st.grid[2][2], -1, 'the bomb itself leaves nothing');
+  assert.strictEqual(st.grid[0][0], 5, 'the far bubble stays');
+  assert.strictEqual(pop.gain, pop.cells.length * 10);
+});
+
+test('a bomb leaves hanging bubbles to fall with the usual doubling bonus', () => {
+  const st = emptyBoard();
+  put(st, [[0, 2, 0], [1, 2, 1], [2, 2, 2], [3, 2, 3], [4, 2, 4]]);       // 천장에서 늘어진 줄
+  const score0 = st.score;
+  stickAt(st, L.BOMB, 2, 3);                                              // 줄 가운데를 터뜨리면 아래가 끊긴다
+  const drop = st.events.find((e) => e.type === 'drop');
+  assert.ok(drop, 'the cut-off part falls');
+  assert.strictEqual(drop.bonus, L.dropBonus(drop.cells.length));
+  assert.ok(st.score > score0);
+});
+
+test('a bomb with nothing around it just disappears', () => {
+  const st = emptyBoard();
+  put(st, [[0, 0, 1]]);
+  stickAt(st, L.BOMB, 0, 7);
+  assert.ok(!popOf(st));
+  assert.strictEqual(L.colorsOnBoard(st.grid).length, 1);
+  assert.strictEqual(count(st.grid), 1);
+});
+
+test('rainbow becomes the neighbour colour that makes the biggest group', () => {
+  const st = emptyBoard();
+  put(st, [[0, 2, 0], [0, 3, 0], [0, 4, 1]]);                              // 빨강 2개 + 노랑 1개 사이
+  assert.strictEqual(L.rainbowColor(st, 1, 3), 0, 'next to red and yellow it picks red (red makes a group of three)');   // 효과를 쓰기 전에 확인
+  stickAt(st, L.RAINBOW, 1, 3);                                            // (1,3) 은 (0,3)(0,4) 와 이웃
+  const pop = popOf(st);
+  assert.ok(!pop || pop.special === L.RAINBOW);
+  // 1,3 은 빨강(0,3)과 노랑(0,4) 둘과 이웃 → 빨강 덩어리(0,2),(0,3)+자기 = 3개라 터진다
+  assert.ok(pop, 'it completed a group of three');
+  assert.strictEqual(pop.cells.length, 3);
+});
+
+test('rainbow that cannot pop settles in as that colour; at the ceiling with no neighbours it picks a board colour', () => {
+  const st = emptyBoard();
+  put(st, [[0, 0, 2], [3, 5, 4]]);                                         // (3,5) 는 천장에 안 이어진 구슬이지만 팔레트 확인용
+  stickAt(st, L.RAINBOW, 1, 0);                                            // (0,0) 파랑 하나와만 이웃 → 둘이 되어 터지지 않음
+  assert.ok(!popOf(st));
+  assert.strictEqual(st.grid[1][0], 2);
+  const c = L.rainbowColor(st, 0, 6);                                      // 이웃이 없는 자리
+  assert.ok(L.colorsOnBoard(st.grid).includes(c));
+});
+
+test('bolt clears the whole row it lands on, or the row above when that row is empty', () => {
+  const st = emptyBoard();
+  put(st, [[0, 0, 0], [0, 1, 1], [0, 2, 2], [0, 3, 3], [0, 4, 4], [0, 5, 0], [0, 6, 1], [0, 7, 2], [1, 3, 5]]);
+  stickAt(st, L.BOLT, 1, 4);
+  const pop = popOf(st);
+  assert.ok(pop && pop.special === L.BOLT);
+  assert.strictEqual(pop.cells.every((p) => p.r === 1), true, 'row 1 only');
+  assert.strictEqual(pop.cells.length, 1);
+
+  const st2 = emptyBoard();
+  put(st2, [[0, 0, 0], [0, 1, 1], [0, 2, 2], [0, 3, 3]]);
+  assert.strictEqual(L.boltRow(st2, 1), 0, 'row 1 is empty, so the row above is used');
+  stickAt(st2, L.BOLT, 1, 1);
+  const pop2 = popOf(st2);
+  assert.ok(pop2);
+  assert.strictEqual(pop2.cells.length, 4);
+});
+
+test('shooting a special for real: it lands, applies its effect and the waiting bubbles stay special-safe', () => {
+  const st = L.newGame(rng(4), { items: true });
+  st.grid = L.emptyGrid();
+  put(st, [[0, 3, 0], [0, 4, 0], [0, 2, 1]]);
+  st.cur = L.BOMB; st.nxt = L.RAINBOW;
+  shoot(st, Math.PI / 2);
+  assert.ok(st.events.some((e) => e.type === 'special' && e.kind === L.BOMB));
+  assert.ok(L.isSpecial(st.cur), 'the waiting special is not swapped for a colour');
+  assert.ok(L.swap(st) === false || st.cur !== undefined);
+  assert.ok(!L.colorsOnBoard(st.grid).some((v) => v >= 10), 'no special is ever left on the board');
+});
+
+test('item mode does not break stage clear or game over', () => {
+  const st = L.newGame(rng(6), { items: true });
+  st.grid = L.emptyGrid();
+  put(st, [[0, 3, 0]]);
+  st.cur = L.BOLT;
+  shoot(st, Math.PI / 2);
+  assert.strictEqual(st.phase, 'clear', 'clearing the last bubbles with a special still clears the stage');
+});
